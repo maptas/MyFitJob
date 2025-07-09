@@ -1,0 +1,55 @@
+name: CI/CD - Deploy to Clever Cloud
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js 18
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: 'src/MyFITJob.Frontend/package-lock.json'
+        
+    - name: Install dependencies
+      run: |
+        cd src/MyFITJob.Frontend
+        npm ci
+        
+    - name: Build application
+      run: |
+        cd src/MyFITJob.Frontend
+        npm run build
+        
+    - name: Install Clever Tools
+      run: npm install -g clever-tools
+      
+    - name: Create review app
+      uses: CleverCloud/clever-cloud-review-app@v2.0.1
+      env:
+        CLEVER_SECRET: ${{ secrets.CLEVER_SECRET }}
+        CLEVER_TOKEN: ${{ secrets.CLEVER_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # ORGA_ID: ${{ secrets.ORGA_ID }}
+        GH_CC_RUN_SUCCEEDED_HOOK: ${{ secrets.CC_RUN_SUCCEEDED_HOOK }} # This environment variable will be set on Clever Cloud
+      with:
+        type: 'docker'
+        set-env: true # Enables the command to set en vars on Clever Cloud
+  
+    - name: Quality Checks
+      if: github.event_name == 'pull_request'
+      run: |
+        cd src/MyFITJob.Frontend
+        npm run lint
+

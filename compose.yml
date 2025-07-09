@@ -1,0 +1,222 @@
+services:
+  db:
+    image: postgres:17.2
+    container_name: myfitjob-db
+    restart: always
+    environment:
+      POSTGRES_USER: myfitjob
+      POSTGRES_PASSWORD: myfitjobpass
+      POSTGRES_DB: myfitjobdb
+      # setting these means when you exec in psql, you don't need to specify the db name
+      PGDATABASE: myfitjobdb
+      PGUSER: myfitjob
+      PGPASSWORD: myfitjobpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: ./src/MyFITJob.Api
+      dockerfile: Dockerfile
+      target: prod
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - Logging__LogLevel__Default=Debug
+      - ConnectionStrings__DefaultConnection=Host=db;Port=5432;Database=myfitjobdb;Username=myfitjob;Password=myfitjobpass
+      - ContactsApi__BaseUrl=http://contacts:3002
+      - RabbitMQ__Host=amqp://rabbitmq:5672
+      - RabbitMQ__ServiceName=MyFITJob.Api
+      - IdentityServer__Authority=http://identity:8080
+    depends_on:
+      - db
+      - rabbitmq
+
+  frontend:
+    build:
+      context: src/MyFITJob.Frontend
+      dockerfile: Dockerfile
+      target: dev
+    volumes:
+      - ./src/MyFITJob.Frontend:/app:cached
+      - /app/node_modules  # pour isoler les dépendances
+    working_dir: /app
+    command: npm run dev -- --host 0.0.0.0
+    environment:
+      NODE_ENV: development
+    depends_on:
+      - rabbitmq
+
+  contacts:
+    build:
+      context: ./src/MyFITJob.Contacts
+      dockerfile: DockerFile
+    ports:
+      - "3010:3002"
+    environment:
+      NODE_ENV: production
+      DATA_DIR: /app/data
+      RABBITMQ_URL: amqp://rabbitmq:5672
+      MONGODB_URI: mongodb://admin:adminpass@mongodb:27017/contactsdb?authSource=admin
+      MONGODB_DATABASE: contactsdb
+    volumes:
+      - contacts_data:/app/data
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  identity:
+    build:
+      context: ./src/MyFITJob.Identity
+      dockerfile: Dockerfile
+    ports:
+      - "5001:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__MongoDB=mongodb://admin:adminpass@mongodb:27017/identitydb?authSource=admin
+      - MongoDbSettings__DatabaseName=identitydb
+    volumes:
+    - identity_keys:/keys 
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:latest
+    container_name: myfitjob-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - frontend
+      - backend
+      - contacts
+    cpus: 0.2
+    mem_limit: 128m
+
+# Message Broker 
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: myfitjob-rabbitmq
+    ports:
+      - "5672:5672" # Queue 
+      - "15672:15672" # Portail web
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    hostname: rabbitmq
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 5s
+      timeout: 5s
+      retries: 3
+
+# Base de données MongoDB pour les Contacts
+  mongodb:
+    image: mongo:7.0
+    container_name: myfitjob-mongodb
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: adminpass
+      MONGO_INITDB_DATABASE: contactsdb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./src/MyFITJob.Contacts/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+
+# Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: myfitjob-prometheus-workload
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    cpus: 0.5
+    mem_limit: 512m
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: myfitjob-grafana-workload
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    cpus: 0.5
+    mem_limit: 512m
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: myfitjob-postgres-exporter-workload
+    environment:
+      - DATA_SOURCE_NAME=postgresql://myfitjob:myfitjobpass@db:5432/myfitjobdb?sslmode=disable
+    ports:
+      - "9187:9187"
+    depends_on:
+      - db
+    cpus: 0.2
+    mem_limit: 256m
+
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:latest
+    container_name: myfitjob-nginx-exporter
+    command:
+      - --nginx.scrape-uri=http://frontend/nginx_status
+    ports:
+      - "9113:9113"
+    depends_on:
+      - frontend
+    cpus: 0.1
+    mem_limit: 128m
+
+  nginx-reverse-exporter:
+    image: nginx/nginx-prometheus-exporter:latest
+    container_name: myfitjob-nginx-reverse-exporter
+    command:
+      - --nginx.scrape-uri=http://nginx/nginx_status
+    ports:
+      - "9114:9113"
+    depends_on:
+      - nginx
+    cpus: 0.1
+    mem_limit: 128m
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: myfitjob-jaeger
+    ports:
+      - "16686:16686"   # UI Jaeger (web)
+      - "6831:6831/udp" # Agent (UDP)
+      - "6832:6832/udp"
+      - "14268:14268"   # Collector (HTTP)
+      - "14250:14250"   # gRPC
+      - "9411:9411"     # Zipkin compatible
+    cpus: 0.2
+    mem_limit: 256m
+
+
+volumes:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+  contacts_data: 
+  rabbitmq_data:
+  mongodb_data:
+  identity_keys:
