@@ -14,9 +14,9 @@ export function Header() {
           <div className="flex items-center space-x-2">
             <Avatar className="h-8 w-8">
               <AvatarImage src="/avatar-placeholder.png" alt="Avatar" />
-              <AvatarFallback>TODO</AvatarFallback>
+              <AvatarFallback>Mathias Pochot</AvatarFallback>
             </Avatar>
-            <span className="text-sm font-medium">TODO</span>
+            <span className="text-sm font-medium">Mathias Pochot</span>
           </div>
         </div>
       </div>
